@@ -498,6 +498,8 @@ CPU / RAM / Disk / Network
 | systemctl restart docker | 重启 docker         |
 | systemctl enable docker  | 开机自动启动 docker |
 
+
+
 ## 镜像 (image)
 
 镜像内部涵盖了一个最小操作系统和我们的程序及依赖包
@@ -540,6 +542,8 @@ CPU / RAM / Disk / Network
 ```
 
 
+
+---
 
 ## 容器 (container)
 
@@ -600,9 +604,457 @@ CPU / RAM / Disk / Network
 
 
 
-### 容器中的数据卷
 
 
+## 容器的数据卷（Volume）与挂载覆盖机制
+
+Docker 容器的文件系统可以简单理解为：
+
+```
+Image（只读）
+   ↓
+Container Layer（容器可写层）
+   ↓
+Volume / Bind Mount（挂载）
+```
+
+容器启动时，Docker 会在 **Image 的只读层之上创建一个可写的 Container Layer**。如果直接修改容器中的文件，修改会写入这个可写层；删除 Container 后，这些数据通常也会随之消失。
+
+如果希望数据独立于 Container 生命周期，就需要使用 **Volume 或 Bind Mount**。
+
+------
+
+
+
+## Docker Volume
+
+创建一个 Volume：
+
+```
+docker volume create mydata
+```
+
+这里的 `mydata` 是 **Volume 名称，不是宿主机目录**。
+
+Docker 会在自己的数据目录中创建这个 Volume。
+
+Linux 上通常类似：
+
+```
+/var/lib/docker/volumes/mydata/
+└── _data/
+    ├── file1
+    └── file2
+```
+
+可以通过：
+
+```
+docker volume inspect mydata
+```
+
+查看实际的 `Mountpoint`：
+
+```
+{
+    "Name": "mydata",
+    "Driver": "local",
+    "Mountpoint": "/var/lib/docker/volumes/mydata/_data"
+}
+```
+
+在 **macOS + Docker Desktop** 中需要特别注意：
+
+```
+macOS
+ │
+ └── Docker Desktop
+      │
+      └── Linux VM
+           │
+           └── Docker Engine
+                │
+                └── /var/lib/docker/volumes/mydata/_data
+```
+
+因此这个目录实际上位于 **Docker Desktop 的 Linux VM 内部**，而不是直接位于 macOS 的文件系统中。
+
+------
+
+
+
+### 将 Volume 挂载到容器
+
+```
+docker run \
+  --mount type=volume, source=mydata, target=/app/data \
+  ubuntu
+```
+
+也可以简写：
+
+```
+docker run -v mydata:/app/data ubuntu
+```
+
+这里：
+
+```
+source=mydata
+      ↓
+Docker Volume 的名字
+
+target=/app/data
+      ↓
+容器内部的挂载点
+```
+
+最终关系：
+
+```
+Docker Volume
+mydata
+   │
+   ↓
+Docker 管理的存储区域
+   │
+   │ mount
+   ↓
+Container
+/app/data
+```
+
+------
+
+
+
+### Volume 的初始化与覆盖
+
+假设 Image 原本有：
+
+```
+/app/data/
+├── a.txt
+├── b.txt
+└── config.json
+```
+
+第一次将一个**空 Volume**挂载到 `/app/data`：
+
+```
+docker run -v mydata:/app/data ubuntu
+```
+
+Docker 默认会将 Image 中 `/app/data` 的已有内容复制到这个空 Volume：
+
+```
+Image                    Volume
+/app/data/               mydata/
+├── a.txt        →       ├── a.txt
+├── b.txt        →       ├── b.txt
+└── config.json  →       └── config.json
+```
+
+随后：
+
+```
+Container:
+/app/data
+    ↓
+Volume: mydata
+```
+
+以后删除 Container：
+
+```
+docker rm container1
+```
+
+Volume 仍然存在。
+
+重新创建 Container：
+
+```
+docker run -v mydata:/app/data ubuntu
+```
+
+仍然可以使用原来的数据。
+
+如果 Volume **本身已经有数据**，则不会再把 Image 中的数据复制进去，Volume 的内容会直接遮蔽挂载点原来的内容。
+
+------
+
+
+
+## 直接映射宿主机磁盘目录：Bind Mount
+
+如果不想让 Docker 自己管理存储位置，而是希望：
+
+> **直接把宿主机上的某个目录映射到容器。**
+
+就使用 **Bind Mount**。
+
+例如 Mac 上：
+
+```
+/Users/xxx/project
+```
+
+映射到容器：
+
+```
+/app
+```
+
+可以：
+
+```
+docker run \
+  --mount type=bind,source=/Users/xxx/project,target=/app \
+  ubuntu
+```
+
+或者使用简写：
+
+```
+docker run \
+  -v /Users/xxx/project:/app \
+  ubuntu
+```
+
+关系变成：
+
+```
+macOS
+/Users/xxx/project
+        │
+        │ Bind Mount
+        ↓
+Container
+/app
+```
+
+这与 Volume 有本质区别：
+
+```
+Volume：
+
+Docker
+└── Volume mydata
+     └── Docker 管理的数据
+             ↓
+        /app/data
+
+
+Bind Mount：
+
+macOS
+└── /Users/xxx/project
+             ↓
+        /app
+```
+
+------
+
+
+
+### Bind Mount 的“覆盖”机制
+
+假设 Image 中原本：
+
+```
+/app/
+├── main.cpp
+├── CMakeLists.txt
+└── README.md
+```
+
+而宿主机：
+
+```
+/Users/xxx/project/
+└── main.cpp
+```
+
+执行：
+
+```
+docker run \
+  -v /Users/xxx/project:/app \
+  ubuntu
+```
+
+容器看到的是：
+
+```
+/app/
+└── main.cpp
+```
+
+Image 中原来的：
+
+```
+CMakeLists.txt
+README.md
+```
+
+==会被**挂载的宿主机目录遮蔽**，而不是自动合并==
+
+因此 Bind Mount 特别适合开发环境：
+
+```
+宿主机源码
+/Users/xxx/project
+       │
+       ↓
+Container
+/app
+       │
+       ↓
+编译器 / CMake / GCC
+```
+
+你在 macOS 上修改：
+
+```
+main.cpp
+```
+
+容器里的：
+
+```
+/app/main.cpp
+```
+
+会立即看到修改。
+
+------
+
+
+
+## Volume 与 Bind Mount 的核心区别
+
+|                   | Volume                 | Bind Mount                 |
+| ----------------- | ---------------------- | -------------------------- |
+| 创建方式          | `docker volume create` | 不需要创建                 |
+| source            | Volume 名称            | 宿主机真实路径             |
+| 存储位置          | Docker 管理            | 用户指定                   |
+| Docker 管理       | ✅                      | ❌                          |
+| 适合数据库数据    | ✅                      | 可以，但通常 Volume 更合适 |
+| 适合源码开发      | 可以                   | **非常适合**               |
+| macOS 上的位置    | Docker Linux VM 内     | macOS 指定目录             |
+| 删除 Container 后 | 默认保留               | 宿主机文件当然保留         |
+
+------
+
+## 常用 CLI
+
+ Volume
+
+```
+# 创建
+docker volume create mydata
+
+# 查看所有 Volume
+docker volume ls
+
+# 查看详细信息
+docker volume inspect mydata
+
+# 删除
+docker volume rm mydata
+
+# 删除所有未使用 Volume
+docker volume prune
+```
+
+Volume 挂载
+
+```dockerfile
+docker run \
+  --mount type=volume,source=mydata,target=/app/data \
+  ubuntu
+```
+
+简写：
+
+```bash
+docker run -v mydata:/app/data ubuntu
+```
+
+只读：
+
+```bash
+docker run -v mydata:/app/data:ro ubuntu
+```
+
+---
+
+**Bind Mount**
+
+```bash
+docker run \
+  --mount type=bind,source=/Users/xxx/project,target=/app \
+  ubuntu
+```
+
+简写：
+
+```bash
+docker run \
+  -v /Users/xxx/project:/app \
+  ubuntu
+```
+
+只读：
+
+```bash
+docker run \
+  -v /Users/xxx/project:/app:ro \
+  ubuntu
+```
+
+------
+
+
+
+总结：Docker 的持久化存储主要记住两种：
+
+```
+Volume
+│
+├── source = mydata
+├── Docker 管理存储位置
+└── 适合持久化应用数据
+
+Bind Mount
+│
+├── source = /Users/xxx/project
+├── 直接映射宿主机目录
+└── 适合源码、配置文件、开发环境
+```
+
+
+
+而两者挂载后的共同本质都是：
+
+```
+宿主机 / Docker Storage
+          │
+          │ Mount
+          ↓
+      Container
+          │
+          └── /app 或 /app/data
+```
+
+**挂载之后，挂载源会遮蔽容器原来对应路径的内容；区别在于 Volume 的存储位置由 Docker 管理，而 Bind Mount 的存储位置由你直接指定。**
+
+
+
+
+
+---
 
 # 配置可使用 SSH 的容器
 
