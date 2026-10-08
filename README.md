@@ -16,7 +16,6 @@
 <b><font size=6>Docker 学习笔记</font></b>
 
 
-
 [![License](https://img.shields.io/badge/license-Apache%202.0-brightgreen)](LICENSE)
 
 </div>
@@ -120,7 +119,13 @@ Docker 概念：
 
 - `daemon` - 是守护进程，控制开启关闭或者开始 Docker 容器
 
+---
 
+
+
+
+
+---
 
 
 
@@ -128,7 +133,354 @@ Docker 概念：
 
 ![image-20230416175800875](doc/pic/image-20230416175800875.png)
 
+----
 
+
+
+# Docker 容器的 Linux Kernel 共享机制
+
+Docker 容器**不是一台完整的 Linux 虚拟机**。
+
+即使使用不同的 Docker Image 创建容器，这些容器在同一个 Docker Linux 环境中运行时，仍然会==**共享同一个 Linux Kernel**。==
+
+例如：
+
+```
+                    Linux Kernel
+                         │
+          ┌──────────────┼──────────────┐
+          │              │              │
+          ▼              ▼              ▼
+   Ubuntu Container Debian Container Alpine Container
+```
+
+这里：
+
+- Ubuntu、Debian、Alpine 是不同的 **用户空间（Userspace）**
+- 三个 Container 是不同的运行环境
+- ==**Linux Kernel 只有一个**==
+
+------
+
+
+
+## Docker Image 中有什么？
+
+Docker Image 主要包含：
+
+```
+Ubuntu Image
+├── /bin
+├── /etc
+├── /usr
+├── /lib
+├── /var
+├── glibc
+├── bash
+└── 其他用户空间程序
+```
+
+可以简单理解为：
+
+> **Docker Image = 文件系统 + 用户空间程序**
+
+它通常**不包含一个需要独立启动的 Linux Kernel**。
+
+因此：
+
+```
+docker run ubuntu
+docker run debian
+docker run alpine
+```
+
+虽然使用了三个不同的 Image，但==它们并不会各自启动一个 Linux Kernel。==
+
+------
+
+
+
+## 不同 Image 也会共享 Kernel
+
+例如：
+
+```
+                         Linux Kernel
+                              │
+             ┌────────────────┼────────────────┐
+             │                │                │
+             ▼                ▼                ▼
+        Ubuntu C1         Debian C2        Alpine C3
+        glibc + bash      glibc + bash     musl + sh
+```
+
+三个容器可以拥有完全不同的：
+
+- Linux 发行版
+- C/C++ 运行库
+- Shell
+- Python 版本
+- 系统工具
+- 文件系统内容
+
+但是它们执行底层系统调用时，最终都会进入**同一个 Linux Kernel**。
+
+例如：
+
+```
+Container A ──┐
+Container B ──┼──→ Linux Kernel
+Container C ──┘
+```
+
+常见系统调用包括：
+
+```
+open()
+read()
+write()
+socket()
+mmap()
+clone()
+```
+
+这些操作最终都是由共享的 Linux Kernel 负责执行。
+
+------
+
+## 为什么容器能够做到隔离？
+
+虽然容器共享 Kernel，但并不意味着容器之间完全没有隔离。
+
+Linux Kernel 本身提供了多种隔离机制，其中最重要的是：
+
+### Namespace
+
+Namespace 决定：
+
+> **容器能够“看到”什么。**
+
+例如不同容器可以拥有各自独立的：
+
+- PID
+- Network
+- Mount
+- IPC
+- Hostname
+- User
+
+因此 Container A 中可能看到：
+
+```
+PID 1
+PID 2
+PID 3
+```
+
+Container B 中也可能看到：
+
+```
+PID 1
+PID 2
+PID 3
+```
+
+虽然它们背后实际上都由**同一个 Kernel**管理。
+
+------
+
+### cgroups
+
+cgroups 决定：
+
+> **容器能够使用多少资源。**
+
+例如：
+
+```
+Linux Kernel
+│
+├── Container A
+│   ├── CPU ≤ 2 cores
+│   └── Memory ≤ 4 GB
+│
+└── Container B
+    ├── CPU ≤ 1 core
+    └── Memory ≤ 2 GB
+```
+
+Kernel 负责限制：
+
+- CPU
+- Memory
+- Disk I/O
+- Process 数量等
+
+因此可以简单记忆：
+
+> **Namespace：隔离“看到什么”**
+> **cgroups：限制“能用多少”**
+
+------
+
+
+
+## 与虚拟机的区别
+
+### Docker Container
+
+```
+                 Linux Kernel
+                      │
+          ┌───────────┼───────────┐
+          ▼           ▼           ▼
+     Container A Container B Container C
+       Ubuntu       Debian       Alpine
+```
+
+特点：
+
+> **多个容器共享一个 Linux Kernel。**
+
+------
+
+### Virtual Machine
+
+```
+             Hypervisor
+          ┌──────┼──────┐
+          ▼      ▼      ▼
+        VM A   VM B   VM C
+          │      │      │
+       Kernel A Kernel B Kernel C
+          │      │      │
+       Ubuntu  Debian  Alpine
+```
+
+特点：
+
+> **每台 VM 都拥有自己的 Linux Kernel。**
+
+所以两者最核心的区别可以记成：
+
+|                 | Docker Container      | Virtual Machine |
+| --------------- | --------------------- | --------------- |
+| Kernel          | **共享**              | **独立**        |
+| 用户空间        | 独立                  | 独立            |
+| 隔离方式        | Namespace、cgroups 等 | 硬件虚拟化      |
+| 启动开销        | 通常较低              | 通常较高        |
+| 是否包含完整 OS | 否                    | 是              |
+
+------
+
+
+
+## macOS 上的 Docker Desktop
+
+在 macOS 上还需要特别注意：
+
+**Docker Container 并不是直接运行在 macOS 的 XNU Kernel 上。**
+
+大致结构是：
+
+```
+macOS
+ │
+ │
+ └── Linux VM
+      │
+      └── Linux Kernel
+           │
+           ├── Ubuntu Container
+           ├── Debian Container
+           └── Alpine Container
+```
+
+因此在 Mac 上：
+
+> **多个 Docker Container 共享的是 Docker Desktop Linux VM 中的 Linux Kernel，而不是 macOS 的 Kernel。**
+
+例如在容器中执行：
+
+```
+uname -r
+```
+
+看到的 Kernel 版本实际上对应的是 Docker 所运行的 Linux 环境。
+
+------
+
+
+
+**一个非常重要的结论：**
+
+**更换 Docker Image ≠ 更换 Linux Kernel。**
+
+例如：
+
+```
+Ubuntu Image
+       ↓
+Ubuntu Container
+       ↓
+共享 Linux Kernel
+
+Debian Image
+       ↓
+Debian Container
+       ↓
+共享 Linux Kernel
+
+Alpine Image
+       ↓
+Alpine Container
+       ↓
+共享 Linux Kernel
+```
+
+因此，即使：
+
+```
+Ubuntu 24.04
+Debian 13
+Alpine 3.x
+```
+
+三个容器使用完全不同的用户空间，它们仍然可以共享同一个 Linux Kernel。
+
+------
+
+
+
+**一句话记忆:**
+
+> **Docker Container：共享 Kernel，隔离用户空间。**
+
+> **Virtual Machine：Kernel 也相互独立。**
+
+可以把 Docker Image 简单理解成：
+
+> **“我要给你什么软件环境。”**
+
+把 Container 理解成：
+
+> **“我要运行这个软件环境里的进程。”**
+
+把 Linux Kernel 理解成：
+
+> **“我负责管理 CPU、内存、网络、磁盘以及系统调用。”**
+
+最终结构就是：
+
+```
+不同 Image
+    ↓
+不同 Container
+    ↓
+共享 Linux Kernel
+    ↓
+CPU / RAM / Disk / Network
+```
 
 
 
